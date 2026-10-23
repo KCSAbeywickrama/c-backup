@@ -15,10 +15,50 @@ be restored by the other.
 ## Install
 
 ```sh
-cargo install --path .            # puts claude-backup on ~/.cargo/bin
-# or
-cargo build --release && cp target/release/claude-backup /usr/local/bin/
+curl -fsSL https://raw.githubusercontent.com/KCSAbeywickrama/claude-backup/main/install.sh | sh
 ```
+
+Downloads a prebuilt binary for your platform, verifies its SHA-256 against the
+release checksums, then installs `claude-backup` into `~/.local/bin`. No Rust
+toolchain needed.
+
+Prebuilt binaries cover macOS (Apple Silicon and Intel) and Linux (x86_64 and
+arm64, statically linked). Any other platform builds from source automatically,
+which does need a Rust toolchain (1.88 or newer, [rustup.rs](https://rustup.rs)).
+
+```sh
+BINDIR=/usr/local/bin ./install.sh   # choose another bin dir
+VERSION=v0.1.0 ./install.sh          # pin a specific release
+FROM_SOURCE=1 ./install.sh           # skip the download, build locally
+```
+
+This also installs `cbk`, a short alias for `claude-backup`; the two are
+interchangeable. If the script warns that the bin dir is not on your PATH, add
+it, for example to `~/.zshrc`:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+Uninstall:
+
+```sh
+./uninstall.sh
+```
+
+### Working on the code
+
+`install-dev.sh` points `~/.local/bin/claude-backup` at `target/release/claude-backup`
+with a symlink instead of copying it, so `cargo build --release` updates the
+installed command in place while you work:
+
+```sh
+./install-dev.sh
+```
+
+`cargo clean` removes what the symlink points at, so rebuild or re-run it after
+one. Releases are cut by pushing a `v*` tag; the workflow in `.github/workflows/`
+builds the four targets, writes `SHA256SUMS`, and publishes them.
 
 ## Use
 

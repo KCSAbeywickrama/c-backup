@@ -2,6 +2,13 @@
 name = "claude-backup"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "Back up and restore everything Claude Code keeps for one project folder: transcripts, plans, memory, checkpoints."
+
+[[bin]]
+name = "claude-backup"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1.0.104"
@@ -16,3 +23,9 @@ serde_json = "1.0.154"
 tar = "0.4.46"
 tempfile = "3.27.0"
 walkdir = "2.5.0"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
