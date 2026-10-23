@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Remove the claude-backup binaries installed by install.sh or install-dev.sh.
+# Remove the c-backup binaries installed by install.sh or install-dev.sh.
 #
 # Usage:
 #   ./uninstall.sh
@@ -9,7 +9,7 @@ set -eu
 BINDIR="${BINDIR:-$HOME/.local/bin}"
 removed=0
 
-for name in claude-backup cbackup; do
+for name in c-backup cbackup; do
   target="$BINDIR/$name"
   if [ -e "$target" ] || [ -L "$target" ]; then
     rm -f "$target"

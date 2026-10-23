@@ -91,7 +91,7 @@ pub fn read_manifest(archive: &Path) -> Result<Manifest> {
         }
     }
     bail!(
-        "{} is not a claude-backup archive (no manifest)",
+        "{} is not a c-backup archive (no manifest)",
         archive.display()
     )
 }

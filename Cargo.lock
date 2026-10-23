@@ -101,6 +101,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
+name = "c-backup"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "flate2",
+ "gethostname",
+ "memchr",
+ "regex",
+ "serde",
+ "serde_json",
+ "tar",
+ "tempfile",
+ "walkdir",
+]
+
+[[package]]
 name = "cc"
 version = "1.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -166,24 +184,6 @@ name = "clap_lex"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
-
-[[package]]
-name = "claude-backup"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "clap",
- "flate2",
- "gethostname",
- "memchr",
- "regex",
- "serde",
- "serde_json",
- "tar",
- "tempfile",
- "walkdir",
-]
 
 [[package]]
 name = "colorchoice"

@@ -1,13 +1,14 @@
 [package]
-name = "claude-backup"
+name = "c-backup"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
 description = "Back up and restore everything Claude Code keeps for one project folder: transcripts, plans, memory, checkpoints."
+keywords = ["claude-code", "backup", "transcripts", "cli"]
 
 [[bin]]
-name = "claude-backup"
+name = "c-backup"
 path = "src/main.rs"
 
 [dependencies]

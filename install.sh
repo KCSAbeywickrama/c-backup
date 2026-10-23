@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Install claude-backup.
+# Install c-backup.
 #
 # Downloads a prebuilt static binary from GitHub Releases for this platform and
 # verifies its SHA-256 before installing. Falls back to building with cargo when
@@ -20,7 +20,7 @@
 set -eu
 
 REPO="${REPO:-KCSAbeywickrama/c-backup}"
-BIN=claude-backup
+BIN=c-backup
 ALIAS=cbackup
 
 BINDIR="${BINDIR:-$HOME/.local/bin}"
@@ -171,7 +171,7 @@ main() {
   esac
 
   echo
-  echo "Try it: cd <project> && cbackup    (or claude-backup; inside Claude Code: !cbackup)"
+  echo "Try it in a project folder: c-backup  or  cbackup    (or inside Claude Code: !cbackup)"
 }
 
 main "$@"

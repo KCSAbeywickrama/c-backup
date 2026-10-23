@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# Install claude-backup for working on it: build the release binary and symlink it
+# Install c-backup for working on it: build the release binary and symlink it
 # onto your PATH.
 #
 # The install is a symlink into target/release, so a later `cargo build --release`
@@ -16,7 +16,7 @@ set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 BINDIR="${BINDIR:-$HOME/.local/bin}"
-BUILT="$SCRIPT_DIR/target/release/claude-backup"
+BUILT="$SCRIPT_DIR/target/release/c-backup"
 
 if ! command -v cargo >/dev/null 2>&1; then
   echo "install: cargo not found on PATH." >&2
@@ -35,8 +35,8 @@ fi
 
 mkdir -p "$BINDIR"
 
-# Install under both names: `claude-backup` and the short alias `cbackup`.
-for name in claude-backup cbackup; do
+# Install under both names: `c-backup` and the short alias `cbackup`.
+for name in c-backup cbackup; do
   target="$BINDIR/$name"
   if [ -e "$target" ] || [ -L "$target" ]; then
     rm -f "$target"
@@ -57,4 +57,4 @@ case ":$PATH:" in
 esac
 
 echo
-echo "Try it: cd <project> && cbackup    (or claude-backup; inside Claude Code: !cbackup)"
+echo "Try it in a project folder: c-backup  or  cbackup    (or inside Claude Code: !cbackup)"

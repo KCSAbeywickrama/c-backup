@@ -1,4 +1,4 @@
-//! claude-backup: back up and restore Claude Code session data for one project.
+//! c-backup: back up and restore Claude Code session data for one project.
 
 mod backup;
 mod claude;
@@ -27,7 +27,7 @@ folder under ~/.claude (or $CLAUDE_CONFIG_DIR) and packs it into one archive:
 kept unless --force). With no subcommand, `backup` runs.";
 
 #[derive(Parser, Debug)]
-#[command(name = "claude-backup", version, about = "Back up and restore Claude Code session data for one project", long_about = ABOUT)]
+#[command(name = "c-backup", version, about = "Back up and restore Claude Code session data for one project", long_about = ABOUT)]
 #[command(args_conflicts_with_subcommands = true)]
 struct Cli {
     #[command(subcommand)]

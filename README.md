@@ -1,6 +1,8 @@
 # c-backup
 
-Back up and restore everything Claude Code keeps for one project folder.
+Back up and restore everything Claude Code keeps for one project folder. A command-line tool for [Claude Code](https://claude.com/claude-code).
+
+> Not affiliated with or endorsed by Anthropic. Claude is a trademark of Anthropic.
 
 Claude Code stores transcripts, plans, memory and checkpoints under `~/.claude`,
 keyed by the folder you launched it from. It has no built-in backup or restore,
@@ -19,9 +21,9 @@ curl -fsSL https://raw.githubusercontent.com/KCSAbeywickrama/c-backup/main/insta
 ```
 
 Downloads a prebuilt binary for your platform, verifies its SHA-256 against the
-release checksums, then installs `claude-backup` and the short alias `cbackup`
-into `~/.local/bin`. The two names are interchangeable; this README uses
-`cbackup`. No Rust toolchain needed.
+release checksums, then installs `c-backup` and the short alias `cbackup`
+into `~/.local/bin`. The two names are interchangeable. No Rust toolchain
+needed.
 
 Prebuilt binaries cover macOS (Apple Silicon and Intel) and Linux (x86_64 and
 arm64, statically linked). Any other platform builds from source automatically,
@@ -54,7 +56,7 @@ Uninstall:
 
 ### Working on the code
 
-`install-dev.sh` points `~/.local/bin/claude-backup` at `target/release/claude-backup`
+`install-dev.sh` points `~/.local/bin/c-backup` at `target/release/c-backup`
 with a symlink instead of copying it, so `cargo build --release` updates the
 installed command in place while you work:
 
@@ -243,7 +245,3 @@ src/list.rs      list command
 ## License
 
 MIT
-
-## Disclaimer
-
-**c-backup** is a third-party tool and is not affiliated with Anthropic.

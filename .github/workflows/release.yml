@@ -68,16 +68,16 @@ jobs:
       - name: Package
         run: |
           set -eu
-          stage="claude-backup-${{ matrix.target }}"
+          stage="c-backup-${{ matrix.target }}"
           mkdir -p "$stage"
-          cp "target/${{ matrix.target }}/release/claude-backup" "$stage/"
+          cp "target/${{ matrix.target }}/release/c-backup" "$stage/"
           cp LICENSE README.md "$stage/"
           tar -czf "$stage.tar.gz" "$stage"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: claude-backup-${{ matrix.target }}
-          path: claude-backup-${{ matrix.target }}.tar.gz
+          name: c-backup-${{ matrix.target }}
+          path: c-backup-${{ matrix.target }}.tar.gz
           if-no-files-found: error
 
   release:
@@ -116,7 +116,7 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${TAG}/install.sh | sh
           \`\`\`
 
-          Installs \`claude-backup\` and the short alias \`cbackup\` into \`~/.local/bin\`.
+          Installs \`c-backup\` and the short alias \`cbackup\` into \`~/.local/bin\`.
           Set \`BINDIR\` to install elsewhere, or \`VERSION=${TAG}\` to pin this release.
 
           ## Verify
@@ -133,17 +133,17 @@ jobs:
           attribute is cleared:
 
           \`\`\`sh
-          xattr -d com.apple.quarantine ./claude-backup
+          xattr -d com.apple.quarantine ./c-backup
           \`\`\`
 
           ## Assets
 
           | Platform | Asset |
           | --- | --- |
-          | macOS (Apple Silicon) | \`claude-backup-aarch64-apple-darwin.tar.gz\` |
-          | macOS (Intel) | \`claude-backup-x86_64-apple-darwin.tar.gz\` |
-          | Linux (x86_64, static) | \`claude-backup-x86_64-unknown-linux-musl.tar.gz\` |
-          | Linux (arm64, static) | \`claude-backup-aarch64-unknown-linux-musl.tar.gz\` |
+          | macOS (Apple Silicon) | \`c-backup-aarch64-apple-darwin.tar.gz\` |
+          | macOS (Intel) | \`c-backup-x86_64-apple-darwin.tar.gz\` |
+          | Linux (x86_64, static) | \`c-backup-x86_64-unknown-linux-musl.tar.gz\` |
+          | Linux (arm64, static) | \`c-backup-aarch64-unknown-linux-musl.tar.gz\` |
           NOTES
           cat notes.md
 
