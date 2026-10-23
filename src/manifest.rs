@@ -1,5 +1,5 @@
-//! The `manifest.json` stored first in every archive. Field names match the Python
-//! implementation so archives are interchangeable.
+//! The `manifest.json` stored first in every archive. Field names are part of the
+//! archive format (`MANIFEST_FORMAT`), so renaming one is a format change.
 
 use anyhow::{Context, Result, bail};
 use flate2::read::GzDecoder;
