@@ -1,0 +1,766 @@
+#!/usr/bin/env python3
+"""claude-backup: back up and restore Claude Code session data for one project.
+
+Run it from a project folder. It finds everything Claude Code keeps for that
+folder under ~/.claude (or $CLAUDE_CONFIG_DIR) and packs it into one archive:
+
+  transcripts      projects/<encoded-cwd>/<session>.jsonl (+ subagents, tool-results)
+  memory           projects/<encoded-git-root>/memory/
+  plans            plans/<slug>.md referenced by those sessions
+  checkpoints      file-history/<session>/      (what /rewind uses)
+  session env      session-env/<session>/
+  task lists       tasks/<id>/ referenced by those sessions
+  prompt history   history.jsonl lines for this project
+  project config   the projects["<path>"] entry of ~/.claude.json
+
+`restore` puts them back, non-destructively by default (existing files are
+kept unless --force). Standard library only; Python 3.8+.
+"""
+
+import argparse
+import datetime as dt
+import io
+import json
+import os
+import re
+import socket
+import subprocess
+import sys
+import tarfile
+import tempfile
+from pathlib import Path
+from typing import Dict, List, Optional, Set
+
+TOOL_VERSION = "1.0.0"
+MANIFEST_FORMAT = 1
+MANIFEST_NAME = "manifest.json"
+DEFAULT_OUT = Path(os.environ.get("CLAUDE_BACKUP_DIR", "~/claude-backups")).expanduser()
+
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+SLUG_RE = re.compile(rb'"slug":"([^"\\]{1,200})"')
+PLAN_PATH_RE = re.compile(rb'"planFilePath":"([^"\\]{1,500})"')
+
+
+# --------------------------------------------------------------------------- helpers
+
+def log(msg: str = "") -> None:
+    print(msg, flush=True)
+
+
+def warn(msg: str) -> None:
+    print("warning: " + msg, file=sys.stderr, flush=True)
+
+
+def die(msg: str, code: int = 1) -> None:
+    print("error: " + msg, file=sys.stderr, flush=True)
+    sys.exit(code)
+
+
+def config_dir() -> Path:
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude").expanduser()
+
+
+def claude_json_path() -> Path:
+    """~/.claude.json, or <CLAUDE_CONFIG_DIR>/.claude.json when that variable is set."""
+    if os.environ.get("CLAUDE_CONFIG_DIR"):
+        return config_dir() / ".claude.json"
+    return Path("~/.claude.json").expanduser()
+
+
+def encode_path(path: str) -> str:
+    """Claude Code's project-directory name: every non-alphanumeric char becomes '-'."""
+    return re.sub(r"[^A-Za-z0-9]", "-", path)
+
+
+def git_root(path: Path) -> Optional[Path]:
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    return Path(out.stdout.strip()).resolve()
+
+
+def read_settings(cfg: Path) -> dict:
+    p = cfg / "settings.json"
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def plans_dir(cfg: Path, project_root: Path) -> Path:
+    custom = read_settings(cfg).get("plansDirectory")
+    if custom:
+        return (project_root / Path(custom).expanduser()).resolve()
+    return cfg / "plans"
+
+
+def memory_dir(cfg: Path, memory_root: Path) -> Path:
+    custom = read_settings(cfg).get("autoMemoryDirectory")
+    if custom:
+        return (memory_root / Path(custom).expanduser()).resolve()
+    return cfg / "projects" / encode_path(str(memory_root)) / "memory"
+
+
+def find_project_dir(cfg: Path, project: Path) -> Optional[Path]:
+    """Locate projects/<encoded> for a path. Falls back to scanning transcripts for cwd,
+    which covers the >200-char hashed names Claude Code uses for very long paths."""
+    projects = cfg / "projects"
+    direct = projects / encode_path(str(project))
+    if direct.is_dir():
+        return direct
+    if not projects.is_dir():
+        return None
+    needle = ('"cwd":' + json.dumps(str(project))).encode()
+    for d in projects.iterdir():
+        if not d.is_dir():
+            continue
+        for t in sorted(d.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)[:3]:
+            try:
+                with open(t, "rb") as f:
+                    head = f.read(64 * 1024)
+            except OSError:
+                continue
+            if needle in head:
+                return d
+    return None
+
+
+def dir_size(path: Path) -> int:
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += (Path(root) / name).stat().st_size
+            except OSError:
+                pass
+    return total
+
+
+def human(n: float) -> str:
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return "%.0f %s" % (n, unit) if unit == "B" else "%.1f %s" % (n, unit)
+        n /= 1024.0
+    return "%.1f GB" % n
+
+
+def session_id_of(filename: str) -> Optional[str]:
+    m = UUID_RE.match(filename)
+    return m.group(0) if m else None
+
+
+def scan_transcript(path: Path, task_ids: List[str]) -> dict:
+    """Pull out plan slugs, plan paths, referenced task lists, version and the first prompt."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return {"slugs": [], "plan_paths": [], "tasks": [], "first_prompt": "", "version": ""}
+
+    slugs = sorted({s.decode("utf-8", "replace") for s in SLUG_RE.findall(data) if not UUID_RE.match(s.decode("utf-8", "replace"))})
+    plan_paths = sorted({p.decode("utf-8", "replace") for p in PLAN_PATH_RE.findall(data)})
+    tasks = [t for t in task_ids if t.encode() in data]
+
+    first_prompt = ""
+    version = ""
+    for line in data.split(b"\n", 400)[:400]:
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if not version and isinstance(rec.get("version"), str):
+            version = rec["version"]
+        if not first_prompt and rec.get("type") == "user" and not rec.get("isSidechain"):
+            content = (rec.get("message") or {}).get("content")
+            if isinstance(content, str) and not content.startswith("<"):
+                first_prompt = " ".join(content.split())[:120]
+        if first_prompt and version:
+            break
+    return {"slugs": slugs, "plan_paths": plan_paths, "tasks": tasks,
+            "first_prompt": first_prompt, "version": version}
+
+
+def custom_title(session_dir: Path) -> str:
+    p = session_dir / "custom-title.json"
+    try:
+        with open(p, encoding="utf-8") as f:
+            return str(json.load(f).get("customTitle") or "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
+def running_sessions_for(cfg: Path, project: Path) -> List[dict]:
+    """Interactive Claude Code processes currently open on this project."""
+    found = []
+    sdir = cfg / "sessions"
+    if not sdir.is_dir():
+        return found
+    for p in sdir.glob("*.json"):
+        try:
+            with open(p, encoding="utf-8") as f:
+                rec = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if rec.get("cwd") != str(project):
+            continue
+        pid = rec.get("pid")
+        try:
+            os.kill(int(pid), 0)
+        except (OSError, TypeError, ValueError):
+            continue
+        found.append(rec)
+    return found
+
+
+def tar_filter(ti: tarfile.TarInfo) -> Optional[tarfile.TarInfo]:
+    """Only regular files and directories go in; no symlinks, sockets or lock files."""
+    if ti.issym() or ti.islnk() or ti.isdev() or ti.isfifo():
+        return None
+    if os.path.basename(ti.name) == ".lock":
+        return None
+    ti.uid = ti.gid = 0
+    ti.uname = ti.gname = ""
+    return ti
+
+
+def safe_member(name: str) -> bool:
+    if name.startswith("/") or name.startswith("\\"):
+        return False
+    parts = Path(name).parts
+    return ".." not in parts and all(p not in ("", ".") for p in parts)
+
+
+# --------------------------------------------------------------------------- backup
+
+def cmd_backup(args: argparse.Namespace) -> int:
+    cfg = config_dir()
+    project = Path(args.project or os.getcwd()).expanduser().resolve()
+    if not project.exists():
+        warn("folder %s does not exist; backing up whatever Claude Code still holds for it" % project)
+
+    project_dir = find_project_dir(cfg, project)
+    if project_dir is None:
+        die("no Claude Code data found for %s under %s/projects" % (project, cfg))
+
+    root = git_root(project) or project
+    mem_dir = memory_dir(cfg, root)
+    pl_dir = plans_dir(cfg, root)
+    tasks_root = cfg / "tasks"
+    task_ids = sorted(p.name for p in tasks_root.iterdir() if p.is_dir()) if tasks_root.is_dir() else []
+
+    wanted: Optional[Set[str]] = set(s.strip() for s in args.sessions.split(",") if s.strip()) if args.sessions else None
+    cutoff = dt.datetime.now().timestamp() - args.since * 86400 if args.since else None
+
+    sessions = []
+    plan_files: Dict[str, Path] = {}
+    task_dirs: Dict[str, Path] = {}
+    for t in sorted(project_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True):
+        sid = session_id_of(t.name)
+        if sid is None:
+            continue
+        if wanted is not None and not any(sid.startswith(w) for w in wanted):
+            continue
+        st = t.stat()
+        if cutoff is not None and st.st_mtime < cutoff:
+            continue
+        info = scan_transcript(t, task_ids)
+        sdir = project_dir / sid
+        entry = {
+            "id": sid,
+            "file": t.name,
+            "size": st.st_size,
+            "modified": dt.datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"),
+            "title": custom_title(sdir) if sdir.is_dir() else "",
+            "first_prompt": info["first_prompt"],
+            "claude_version": info["version"],
+            "plans": [],
+            "tasks": info["tasks"],
+            "file_history": (cfg / "file-history" / sid).is_dir() and not args.no_file_history,
+        }
+        for slug in info["slugs"]:
+            p = pl_dir / (slug + ".md")
+            if p.is_file():
+                plan_files[p.name] = p
+                entry["plans"].append(p.name)
+        for raw in info["plan_paths"]:
+            p = Path(raw)
+            if p.is_file() and p.parent.resolve() == pl_dir.resolve():
+                plan_files[p.name] = p
+                if p.name not in entry["plans"]:
+                    entry["plans"].append(p.name)
+        for tid in info["tasks"]:
+            task_dirs[tid] = tasks_root / tid
+        sessions.append(entry)
+
+    if not sessions:
+        die("no sessions matched in %s" % project_dir)
+
+    # prompt history lines for this project
+    history_lines: List[str] = []
+    hist = cfg / "history.jsonl"
+    if hist.is_file():
+        with open(hist, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("project") == str(project):
+                    history_lines.append(line.rstrip("\n"))
+
+    # project entry from ~/.claude.json
+    claude_json_entry = None
+    cj = claude_json_path()
+    if cj.is_file():
+        try:
+            with open(cj, encoding="utf-8") as f:
+                claude_json_entry = json.load(f).get("projects", {}).get(str(project))
+        except (OSError, ValueError):
+            claude_json_entry = None
+
+    manifest = {
+        "format": MANIFEST_FORMAT,
+        "tool_version": TOOL_VERSION,
+        "created_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "hostname": socket.gethostname(),
+        "config_dir": str(cfg),
+        "project_path": str(project),
+        "project_encoded": project_dir.name,
+        "memory_root": str(root),
+        "memory_included": mem_dir.is_dir(),
+        "plans": sorted(plan_files),
+        "tasks": sorted(task_dirs),
+        "history_lines": len(history_lines),
+        "claude_json_entry_included": claude_json_entry is not None,
+        "sessions": sessions,
+    }
+
+    out_dir = Path(args.out).expanduser() / project_dir.name
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    archive = out_dir / ("%s-%s.tar.gz" % (project.name or "root", stamp))
+
+    log("project      %s" % project)
+    log("claude data  %s" % project_dir)
+    log("sessions     %d%s" % (len(sessions), "  (file-history skipped)" if args.no_file_history else ""))
+    log("plans        %d" % len(plan_files))
+    log("memory       %s" % (mem_dir if mem_dir.is_dir() else "none"))
+    log("task lists   %d" % len(task_dirs))
+    log("history      %d prompt lines" % len(history_lines))
+    log("archive      %s" % archive)
+    if args.dry_run:
+        for s in sessions:
+            log("  %s  %-8s %s" % (s["id"][:8], human(s["size"]), s["title"] or s["first_prompt"]))
+        log("dry run: nothing written")
+        return 0
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(archive), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "wb") as raw, tarfile.open(fileobj=raw, mode="w:gz", compresslevel=6) as tar:
+        data = json.dumps(manifest, indent=2).encode()
+        ti = tarfile.TarInfo(MANIFEST_NAME)
+        ti.size = len(data)
+        ti.mtime = int(dt.datetime.now().timestamp())
+        ti.mode = 0o600
+        tar.addfile(ti, io.BytesIO(data))
+
+        for s in sessions:
+            tar.add(str(project_dir / s["file"]), arcname="project/" + s["file"], filter=tar_filter)
+            sdir = project_dir / s["id"]
+            if sdir.is_dir():
+                tar.add(str(sdir), arcname="project/" + s["id"], filter=tar_filter)
+            if s["file_history"]:
+                tar.add(str(cfg / "file-history" / s["id"]), arcname="file-history/" + s["id"], filter=tar_filter)
+            env = cfg / "session-env" / s["id"]
+            if env.is_dir():
+                tar.add(str(env), arcname="session-env/" + s["id"], filter=tar_filter)
+        # loose project-level files (e.g. .session-aliases), but not other sessions' data
+        for p in project_dir.iterdir():
+            if p.is_file() and session_id_of(p.name) is None:
+                tar.add(str(p), arcname="project/" + p.name, filter=tar_filter)
+        if mem_dir.is_dir():
+            tar.add(str(mem_dir), arcname="memory", filter=tar_filter)
+        for name, p in sorted(plan_files.items()):
+            tar.add(str(p), arcname="plans/" + name, filter=tar_filter)
+        for tid, p in sorted(task_dirs.items()):
+            if p.is_dir():
+                tar.add(str(p), arcname="tasks/" + tid, filter=tar_filter)
+        if history_lines:
+            data = ("\n".join(history_lines) + "\n").encode()
+            ti = tarfile.TarInfo("history.jsonl")
+            ti.size = len(data)
+            ti.mode = 0o600
+            tar.addfile(ti, io.BytesIO(data))
+        if claude_json_entry is not None:
+            data = json.dumps(claude_json_entry, indent=2).encode()
+            ti = tarfile.TarInfo("claude-json-project.json")
+            ti.size = len(data)
+            ti.mode = 0o600
+            tar.addfile(ti, io.BytesIO(data))
+
+    log("wrote        %s (%s)" % (archive, human(archive.stat().st_size)))
+    log("note: transcripts are plaintext and can contain file contents and secrets; keep this archive private")
+
+    if args.keep:
+        old = sorted(out_dir.glob("*.tar.gz"), key=lambda p: p.stat().st_mtime, reverse=True)[args.keep:]
+        for p in old:
+            p.unlink()
+            log("pruned       %s" % p)
+    return 0
+
+
+# --------------------------------------------------------------------------- restore
+
+def read_manifest(archive: Path) -> dict:
+    try:
+        with tarfile.open(str(archive), "r:gz") as tar:
+            try:
+                m = tar.extractfile(MANIFEST_NAME)
+            except KeyError:
+                die("%s is not a claude-backup archive (no manifest)" % archive)
+            manifest = json.load(m)
+    except (tarfile.TarError, EOFError, OSError, ValueError) as e:
+        die("cannot read %s: %s" % (archive, e))
+    if manifest.get("format") != MANIFEST_FORMAT:
+        die("unsupported manifest format %r (this tool reads %d)" % (manifest.get("format"), MANIFEST_FORMAT))
+    return manifest
+
+
+def merge_history(cfg: Path, new_lines: List[str], dry_run: bool) -> int:
+    hist = cfg / "history.jsonl"
+    seen = set()
+    needs_newline = False
+    if hist.is_file():
+        with open(hist, "rb") as f:
+            raw = f.read()
+        needs_newline = bool(raw) and not raw.endswith(b"\n")
+        for line in raw.decode("utf-8", "replace").splitlines():
+            try:
+                rec = json.loads(line)
+                seen.add((rec.get("sessionId"), rec.get("timestamp"), rec.get("display")))
+            except ValueError:
+                continue
+    to_add = []
+    for line in new_lines:
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        key = (rec.get("sessionId"), rec.get("timestamp"), rec.get("display"))
+        if key not in seen:
+            seen.add(key)
+            to_add.append(line)
+    if to_add and not dry_run:
+        cfg.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(hist), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as f:
+            if needs_newline:
+                f.write("\n")
+            f.write("\n".join(to_add) + "\n")
+    return len(to_add)
+
+
+def merge_claude_json(entry: dict, project: Path, force: bool, dry_run: bool) -> str:
+    cj = claude_json_path()
+    data = {}
+    if cj.is_file():
+        with open(cj, encoding="utf-8") as f:
+            data = json.load(f)
+    projects = data.setdefault("projects", {})
+    if str(project) in projects and not force:
+        return "kept existing entry (use --force to replace)"
+    if dry_run:
+        return "would write entry"
+    projects[str(project)] = entry
+    if cj.is_file():
+        bdir = config_dir() / "backups"
+        bdir.mkdir(parents=True, exist_ok=True)
+        (bdir / (".claude.json.claude-backup.%d" % int(dt.datetime.now().timestamp() * 1000))).write_bytes(cj.read_bytes())
+    tmp = tempfile.NamedTemporaryFile("w", dir=str(cj.parent), prefix=".claude.json.", delete=False, encoding="utf-8")
+    with tmp:
+        json.dump(data, tmp, indent=2)
+    os.chmod(tmp.name, 0o600)
+    os.replace(tmp.name, str(cj))
+    return "wrote entry"
+
+
+def cmd_restore(args: argparse.Namespace) -> int:
+    archive = Path(args.archive).expanduser()
+    if not archive.is_file():
+        die("archive not found: %s" % archive)
+    manifest = read_manifest(archive)
+    cfg = config_dir()
+
+    if args.original:
+        project = Path(manifest["project_path"])
+    else:
+        project = Path(args.project or os.getcwd()).expanduser().resolve()
+    moved = str(project) != manifest["project_path"]
+    root = git_root(project) or project
+    dest_project = cfg / "projects" / encode_path(str(project))
+    dest_memory = memory_dir(cfg, root)
+    dest_plans = plans_dir(cfg, root)
+
+    wanted: Optional[Set[str]] = set(s.strip() for s in args.sessions.split(",") if s.strip()) if args.sessions else None
+    keep_ids = {s["id"] for s in manifest["sessions"] if wanted is None or any(s["id"].startswith(w) for w in wanted)}
+    if wanted is not None and not keep_ids:
+        die("no sessions in the archive match --sessions")
+
+    log("archive      %s" % archive)
+    log("backed up    %s on %s (%s)" % (manifest["project_path"], manifest["hostname"], manifest["created_at"]))
+    log("restore to   %s%s" % (project, "   [different path: transcripts keep their original cwd]" if moved else ""))
+    log("claude data  %s" % dest_project)
+    log("memory       %s" % dest_memory)
+    log("plans        %s" % dest_plans)
+    log("sessions     %d of %d" % (len(keep_ids), len(manifest["sessions"])))
+    if args.dry_run:
+        log("mode         dry run")
+
+    live = running_sessions_for(cfg, project)
+    if live and args.force and not args.dry_run:
+        die("Claude Code is running on this project (pid %s); close it before restoring with --force"
+            % ", ".join(str(r.get("pid")) for r in live))
+
+    written = skipped = 0
+    history_lines: List[str] = []
+    claude_entry = None
+
+    def dest_for(name: str) -> Optional[Path]:
+        head, _, rest = name.partition("/")
+        if head == "project":
+            sid = session_id_of(rest)
+            if sid is not None and sid not in keep_ids:
+                return None
+            return dest_project / rest
+        if head == "memory":
+            return dest_memory / rest if rest else dest_memory
+        if head == "plans":
+            return dest_plans / rest
+        if head in ("file-history", "session-env"):
+            sid = session_id_of(rest)
+            if sid is not None and sid not in keep_ids:
+                return None
+            return cfg / head / rest
+        if head == "tasks":
+            return cfg / "tasks" / rest
+        return None
+
+    with tarfile.open(str(archive), "r:gz") as tar:
+        for m in tar:
+            if m.name == MANIFEST_NAME:
+                continue
+            if not safe_member(m.name):
+                warn("skipping unsafe member name %r" % m.name)
+                continue
+            if m.name == "history.jsonl":
+                f = tar.extractfile(m)
+                history_lines = f.read().decode("utf-8", "replace").splitlines() if f else []
+                continue
+            if m.name == "claude-json-project.json":
+                f = tar.extractfile(m)
+                claude_entry = json.load(f) if f else None
+                continue
+            if m.isdir():
+                continue
+            if not m.isfile():
+                continue
+            dest = dest_for(m.name)
+            if dest is None:
+                continue
+            if dest.exists() and not args.force:
+                skipped += 1
+                if args.verbose:
+                    log("  keep   %s" % dest)
+                continue
+            if args.dry_run:
+                written += 1
+                if args.verbose:
+                    log("  write  %s" % dest)
+                continue
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            src = tar.extractfile(m)
+            if src is None:
+                continue
+            tmp = tempfile.NamedTemporaryFile("wb", dir=str(dest.parent), prefix=".claude-backup.", delete=False)
+            with tmp, src:
+                while True:
+                    chunk = src.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    tmp.write(chunk)
+            os.chmod(tmp.name, (m.mode & 0o777) or 0o600)
+            os.replace(tmp.name, str(dest))
+            written += 1
+            if args.verbose:
+                log("  write  %s" % dest)
+
+    added = 0
+    if history_lines:
+        if moved and not args.original:
+            fixed = []
+            for line in history_lines:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("sessionId") in keep_ids or rec.get("sessionId") is None:
+                    rec["project"] = str(project)
+                    fixed.append(json.dumps(rec, ensure_ascii=False))
+            history_lines = fixed
+        else:
+            history_lines = [l for l in history_lines if _hist_sid(l) in keep_ids or _hist_sid(l) is None]
+        added = merge_history(cfg, history_lines, args.dry_run)
+
+    cfg_note = "not restored (pass --with-config)"
+    if args.with_config and claude_entry is not None:
+        cfg_note = merge_claude_json(claude_entry, project, args.force, args.dry_run)
+
+    log("files        %d %s, %d kept as they were" % (written, "would be written" if args.dry_run else "written", skipped))
+    log("history      %d prompt lines %s" % (added, "would be added" if args.dry_run else "added"))
+    log("config       %s" % cfg_note)
+    if moved:
+        log("note: /rewind checkpoints and plan references inside transcripts point at the original paths")
+    if not args.dry_run and written:
+        log("resume with  cd %s && claude --resume" % project)
+    return 0
+
+
+def _hist_sid(line: str) -> Optional[str]:
+    try:
+        return json.loads(line).get("sessionId")
+    except ValueError:
+        return None
+
+
+# --------------------------------------------------------------------------- list
+
+def cmd_list(args: argparse.Namespace) -> int:
+    cfg = config_dir()
+    if args.archive:
+        archive = Path(args.archive).expanduser()
+        if archive.is_file():
+            return list_archive(archive, cfg)
+        die("not found: %s" % archive)
+
+    project = Path(args.project or os.getcwd()).expanduser().resolve()
+    if args.local:
+        project_dir = find_project_dir(cfg, project)
+        if project_dir is None:
+            die("no Claude Code data found for %s" % project)
+        log("sessions in %s" % project_dir)
+        for t in sorted(project_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True):
+            sid = session_id_of(t.name)
+            if sid is None:
+                continue
+            info = scan_transcript(t, [])
+            st = t.stat()
+            title = custom_title(project_dir / sid) or info["first_prompt"]
+            log("  %s  %s  %-8s %s" % (sid[:8], dt.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"), human(st.st_size), title[:70]))
+        return 0
+
+    out_dir = Path(args.out).expanduser() / encode_path(str(project))
+    archives = sorted(out_dir.glob("*.tar.gz"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not archives:
+        log("no backups for %s in %s" % (project, Path(args.out).expanduser()))
+        return 0
+    log("backups for %s" % project)
+    for a in archives:
+        try:
+            m = read_manifest(a)
+            log("  %s  %-9s %3d sessions  %2d plans  %s" % (m["created_at"][:19], human(a.stat().st_size), len(m["sessions"]), len(m["plans"]), a))
+        except SystemExit:
+            log("  (unreadable)  %s" % a)
+    return 0
+
+
+def list_archive(archive: Path, cfg: Path) -> int:
+    m = read_manifest(archive)
+    log("archive      %s" % archive)
+    log("project      %s" % m["project_path"])
+    log("created      %s on %s" % (m["created_at"], m["hostname"]))
+    log("memory       %s" % ("included" if m.get("memory_included") else "none"))
+    log("plans        %s" % (", ".join(m["plans"]) or "none"))
+    log("task lists   %d" % len(m.get("tasks", [])))
+    log("history      %d prompt lines" % m.get("history_lines", 0))
+    log("config entry %s" % ("included" if m.get("claude_json_entry_included") else "none"))
+    log("sessions:")
+    local = find_project_dir(cfg, Path(m["project_path"]))
+    for s in m["sessions"]:
+        present = "present" if local and (local / s["file"]).is_file() else "missing locally"
+        extras = []
+        if s.get("plans"):
+            extras.append("%d plan%s" % (len(s["plans"]), "s" if len(s["plans"]) > 1 else ""))
+        if s.get("file_history"):
+            extras.append("checkpoints")
+        log("  %s  %s  %-8s %-16s %s%s" % (
+            s["id"][:8], s["modified"][:16].replace("T", " "), human(s["size"]), present,
+            (s.get("title") or s.get("first_prompt") or "")[:60],
+            ("  [" + ", ".join(extras) + "]") if extras else ""))
+    return 0
+
+
+# --------------------------------------------------------------------------- main
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="claude-backup", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--version", action="version", version="claude-backup " + TOOL_VERSION)
+    sub = p.add_subparsers(dest="cmd")
+
+    b = sub.add_parser("backup", help="archive this folder's Claude Code data (default command)")
+    b.add_argument("--project", help="project folder (default: current directory)")
+    b.add_argument("--out", default=str(DEFAULT_OUT), help="backup root (default: %(default)s, or $CLAUDE_BACKUP_DIR)")
+    b.add_argument("--sessions", help="comma-separated session id prefixes to include (default: all)")
+    b.add_argument("--since", type=float, metavar="DAYS", help="only sessions modified in the last DAYS days")
+    b.add_argument("--no-file-history", action="store_true", help="skip /rewind checkpoints (smaller archive)")
+    b.add_argument("--keep", type=int, metavar="N", help="after writing, delete all but the newest N archives of this project")
+    b.add_argument("--dry-run", action="store_true")
+    b.set_defaults(func=cmd_backup)
+
+    r = sub.add_parser("restore", help="put an archive back into ~/.claude for this folder")
+    r.add_argument("archive")
+    r.add_argument("--project", help="restore for this folder (default: current directory)")
+    r.add_argument("--original", action="store_true", help="restore to the path recorded in the archive")
+    r.add_argument("--sessions", help="comma-separated session id prefixes to restore (default: all)")
+    r.add_argument("--force", action="store_true", help="overwrite files that already exist")
+    r.add_argument("--with-config", action="store_true", help="also restore the ~/.claude.json project entry (trust, allowed tools, MCP)")
+    r.add_argument("--dry-run", action="store_true")
+    r.add_argument("-v", "--verbose", action="store_true", help="print every file")
+    r.set_defaults(func=cmd_restore)
+
+    l = sub.add_parser("list", help="list backups of this folder, or the contents of an archive")
+    l.add_argument("archive", nargs="?", help="archive to inspect")
+    l.add_argument("--project", help="project folder (default: current directory)")
+    l.add_argument("--out", default=str(DEFAULT_OUT), help="backup root (default: %(default)s)")
+    l.add_argument("--local", action="store_true", help="list sessions currently in ~/.claude for this folder")
+    l.set_defaults(func=cmd_list)
+    return p
+
+
+def main(argv: List[str]) -> int:
+    parser = build_parser()
+    if not argv or argv[0].startswith("-") and argv[0] not in ("-h", "--help", "--version"):
+        argv = ["backup"] + argv
+    args = parser.parse_args(argv)
+    if not getattr(args, "func", None):
+        parser.print_help()
+        return 2
+    try:
+        return args.func(args)
+    except KeyboardInterrupt:
+        return 130
+    except BrokenPipeError:
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
