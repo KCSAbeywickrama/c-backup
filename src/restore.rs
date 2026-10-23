@@ -33,6 +33,69 @@ pub struct RestoreArgs {
     /// Print every file
     #[arg(short, long)]
     pub verbose: bool,
+    /// When the folder differs from the archive's, rewrite the old path without asking (non-interactive use)
+    #[arg(long, conflicts_with = "no_rewrite_paths")]
+    pub rewrite_paths: bool,
+    /// When the folder differs from the archive's, keep recorded paths as they are without asking (non-interactive use)
+    #[arg(long)]
+    pub no_rewrite_paths: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Rewrite {
+    NotNeeded,
+    Yes,
+    Declined,
+    Skipped,
+}
+
+fn is_path_boundary(b: Option<&u8>) -> bool {
+    match b {
+        None => true,
+        Some(&c) => !(c.is_ascii_alphanumeric() || c == b'-' || c == b'_' || c == b'.'),
+    }
+}
+
+/// The byte before a match must not belong to a name. Inside JSON strings a line break or tab
+/// is the two bytes `\n` / `\t`, so a path at the start of a line is preceded by that letter.
+fn boundary_before(data: &[u8], pos: usize) -> bool {
+    if pos == 0 {
+        return true;
+    }
+    let prev = data[pos - 1];
+    if is_path_boundary(Some(&prev)) {
+        return true;
+    }
+    matches!(prev, b'n' | b't' | b'r') && pos >= 2 && data[pos - 2] == b'\\'
+}
+
+/// Replace `old` with `new` wherever `old` stands as a whole path or path prefix: not glued to
+/// a name character on either side. `/w/A` matches in `"/w/A"` and `/w/A/x.rs` but not in
+/// `/w/A-other`, `/w/A.bak` or `/x/w/A`. Returns the rewritten bytes and the replacement count.
+pub fn rewrite_paths(data: &[u8], old: &[u8], new: &[u8]) -> (Vec<u8>, usize) {
+    if old.is_empty() || old == new {
+        return (data.to_vec(), 0);
+    }
+    let mut out = Vec::with_capacity(data.len());
+    let mut last = 0;
+    let mut n = 0;
+    for pos in memchr::memmem::find_iter(data, old) {
+        if !boundary_before(data, pos) || !is_path_boundary(data.get(pos + old.len())) {
+            continue;
+        }
+        out.extend_from_slice(&data[last..pos]);
+        out.extend_from_slice(new);
+        last = pos + old.len();
+        n += 1;
+    }
+    out.extend_from_slice(&data[last..]);
+    (out, n)
+}
+
+fn rewritable(name: &Path) -> bool {
+    name.iter()
+        .next()
+        .is_some_and(|h| h == "project" || h == "memory" || h == "plans")
 }
 
 struct Targets<'a> {
@@ -81,9 +144,9 @@ impl Targets<'_> {
     }
 }
 
-fn hist_key(rec: &Value) -> (String, String, String) {
+fn hist_key(rec: &Value) -> (String, String, String, String) {
     let g = |k: &str| rec.get(k).map(Value::to_string).unwrap_or_default();
-    (g("sessionId"), g("timestamp"), g("display"))
+    (g("project"), g("sessionId"), g("timestamp"), g("display"))
 }
 
 fn hist_sid(line: &str) -> Option<String> {
@@ -217,11 +280,7 @@ pub fn run(args: &RestoreArgs) -> Result<()> {
     log(format!(
         "restore to   {}{}",
         project.display(),
-        if moved {
-            "   [different path: transcripts keep their original cwd]"
-        } else {
-            ""
-        }
+        if moved { "   [different path]" } else { "" }
     ));
     log(format!("claude data  {}", dest_project.display()));
     log(format!("memory       {}", dest_memory.display()));
@@ -234,6 +293,33 @@ pub fn run(args: &RestoreArgs) -> Result<()> {
     if args.dry_run {
         log("mode         dry run");
     }
+
+    let rewrite = if !moved {
+        Rewrite::NotNeeded
+    } else if args.rewrite_paths {
+        Rewrite::Yes
+    } else if args.no_rewrite_paths {
+        Rewrite::Declined
+    } else if can_ask() {
+        log("");
+        log(format!(
+            "This archive was made for  {}",
+            manifest.project_path
+        ));
+        log(format!("You are restoring it to    {}", project.display()));
+        let yes = confirm(
+            "Rewrite that path inside the restored transcripts, memory and plans so that\nresumed sessions and /rewind refer to the new folder?",
+            true,
+        );
+        log("");
+        if yes { Rewrite::Yes } else { Rewrite::Declined }
+    } else {
+        Rewrite::Skipped
+    };
+    let old_path = manifest.project_path.as_bytes();
+    let new_path = path_str(&project);
+    let mut rewritten_refs = 0usize;
+    let mut rewritten_files = 0usize;
 
     let live = running_sessions_for(&cfg, &project);
     if !live.is_empty() && args.force && !args.dry_run {
@@ -292,8 +378,18 @@ pub fn run(args: &RestoreArgs) -> Result<()> {
             }
             continue;
         }
+        let rewrite_this = rewrite == Rewrite::Yes && rewritable(&name);
         if args.dry_run {
             written += 1;
+            if rewrite_this {
+                let mut buf = Vec::new();
+                entry.read_to_end(&mut buf)?;
+                let (_, n) = rewrite_paths(&buf, old_path, new_path.as_bytes());
+                if n > 0 {
+                    rewritten_refs += n;
+                    rewritten_files += 1;
+                }
+            }
             if args.verbose {
                 log(format!("  write  {}", dest.display()));
             }
@@ -304,7 +400,18 @@ pub fn run(args: &RestoreArgs) -> Result<()> {
         let mut tmp = tempfile::Builder::new()
             .prefix(".claude-backup.")
             .tempfile_in(parent)?;
-        std::io::copy(&mut entry, &mut tmp)?;
+        if rewrite_this {
+            let mut buf = Vec::new();
+            entry.read_to_end(&mut buf)?;
+            let (out, n) = rewrite_paths(&buf, old_path, new_path.as_bytes());
+            tmp.write_all(&out)?;
+            if n > 0 {
+                rewritten_refs += n;
+                rewritten_files += 1;
+            }
+        } else {
+            std::io::copy(&mut entry, &mut tmp)?;
+        }
         let mode = entry.header().mode().unwrap_or(0) & 0o777;
         fs::set_permissions(
             tmp.path(),
@@ -343,12 +450,11 @@ pub fn run(args: &RestoreArgs) -> Result<()> {
         added = merge_history(&cfg, &lines, args.dry_run)?;
     }
 
-    let mut cfg_note = String::from("not restored (pass --with-config)");
-    if args.with_config
-        && let Some(entry) = &claude_entry
-    {
-        cfg_note = merge_claude_json(entry, &project, args.force, args.dry_run)?;
-    }
+    let cfg_note = match (&claude_entry, args.with_config) {
+        (None, _) => "no ~/.claude.json entry in the archive".to_string(),
+        (Some(_), false) => "not restored (pass --with-config)".to_string(),
+        (Some(entry), true) => merge_claude_json(entry, &project, args.force, args.dry_run)?,
+    };
 
     log(format!(
         "files        {} {}, {} kept as they were",
@@ -370,9 +476,22 @@ pub fn run(args: &RestoreArgs) -> Result<()> {
         }
     ));
     log(format!("config       {cfg_note}"));
-    if moved {
+    match rewrite {
+        Rewrite::NotNeeded => {}
+        Rewrite::Yes => log(format!(
+            "rewrite      {rewritten_refs} path references in {rewritten_files} files{}",
+            if args.dry_run { " (dry run)" } else { "" }
+        )),
+        Rewrite::Declined => {
+            log("rewrite      declined; recorded paths still point at the original folder")
+        }
+        Rewrite::Skipped => log(
+            "rewrite      skipped: no terminal to ask (use --rewrite-paths or --no-rewrite-paths)",
+        ),
+    }
+    if moved && rewrite != Rewrite::Yes {
         log(
-            "note: /rewind checkpoints and plan references inside transcripts point at the original paths",
+            "note: /rewind checkpoints and recorded cwd inside transcripts point at the original folder",
         );
     }
     if !args.dry_run && written > 0 {
@@ -382,4 +501,48 @@ pub fn run(args: &RestoreArgs) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rewrite_paths;
+
+    fn rw(data: &str) -> (String, usize) {
+        let (out, n) = rewrite_paths(data.as_bytes(), b"/w/A", b"/w/B");
+        (String::from_utf8(out).unwrap(), n)
+    }
+
+    #[test]
+    fn rewrites_whole_path_and_prefix() {
+        assert_eq!(rw(r#"{"cwd":"/w/A"}"#), (r#"{"cwd":"/w/B"}"#.into(), 1));
+        assert_eq!(rw("/w/A/src/x.rs"), ("/w/B/src/x.rs".into(), 1));
+        assert_eq!(rw("/w/A"), ("/w/B".into(), 1));
+        assert_eq!(rw("a /w/A b /w/A/c"), ("a /w/B b /w/B/c".into(), 2));
+    }
+
+    #[test]
+    fn leaves_other_paths_alone() {
+        assert_eq!(rw("/w/A-other/x"), ("/w/A-other/x".into(), 0));
+        assert_eq!(rw("/w/A.bak"), ("/w/A.bak".into(), 0));
+        assert_eq!(rw("/w/A_1"), ("/w/A_1".into(), 0));
+        assert_eq!(rw("/w/AB"), ("/w/AB".into(), 0));
+        assert_eq!(rw("/x/w/A/y"), ("/x/w/A/y".into(), 0));
+        assert_eq!(rw("no paths here"), ("no paths here".into(), 0));
+    }
+
+    #[test]
+    fn json_escaped_newline_or_tab_before_path_is_a_boundary() {
+        assert_eq!(rw(r"out\n/w/A/x"), (r"out\n/w/B/x".into(), 1));
+        assert_eq!(rw(r"a\t/w/A"), (r"a\t/w/B".into(), 1));
+        assert_eq!(rw("n/w/A"), ("n/w/A".into(), 0));
+        assert_eq!(rw("\n/w/A"), ("\n/w/B".into(), 1));
+    }
+
+    #[test]
+    fn old_path_prefix_of_new_is_single_pass() {
+        let (out, n) = rewrite_paths(b"/w/A/f", b"/w/A", b"/w/A/sub");
+        assert_eq!((out.as_slice(), n), (&b"/w/A/sub/f"[..], 1));
+        let (out, n) = rewrite_paths(b"x", b"", b"/w/B");
+        assert_eq!((out.as_slice(), n), (&b"x"[..], 0));
+    }
 }

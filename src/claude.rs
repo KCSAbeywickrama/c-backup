@@ -4,7 +4,7 @@ use regex::bytes::Regex;
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::LazyLock;
@@ -28,6 +28,31 @@ pub fn log(line: impl AsRef<str>) {
 
 pub fn warn(msg: impl AsRef<str>) {
     eprintln!("warning: {}", msg.as_ref());
+}
+
+/// True when both stdin and stdout are a terminal, so a question can be asked.
+pub fn can_ask() -> bool {
+    io::stdin().is_terminal() && io::stdout().is_terminal()
+}
+
+/// Ask a yes/no question on the terminal. Enter takes the default; EOF too.
+pub fn confirm(question: &str, default_yes: bool) -> bool {
+    let hint = if default_yes { "[Y/n]" } else { "[y/N]" };
+    loop {
+        print!("{question} {hint} ");
+        let _ = io::stdout().flush();
+        let mut line = String::new();
+        match io::stdin().read_line(&mut line) {
+            Ok(0) | Err(_) => return default_yes,
+            Ok(_) => {}
+        }
+        match line.trim().to_ascii_lowercase().as_str() {
+            "" => return default_yes,
+            "y" | "yes" => return true,
+            "n" | "no" => return false,
+            _ => log("please answer y or n"),
+        }
+    }
 }
 
 pub fn home() -> PathBuf {

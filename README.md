@@ -78,6 +78,12 @@ both, so running it from a subfolder of a repo still picks up the repo's memory.
 -v               print every file
 ```
 
+When the folder you restore into differs from the one the archive was made in,
+`restore` prints both paths and asks whether to rewrite the old path inside the
+restored transcripts, memory and plans (see below). For non-interactive use,
+such as a hook or a script, there is no terminal to ask on, so nothing is
+rewritten unless you pass `--rewrite-paths` or `--no-rewrite-paths`.
+
 Restore is non-destructive by default: files that already exist are kept, and
 prompt-history lines are appended only if not already present. Run it twice
 and the second run writes nothing. `--force` refuses to run while a Claude Code
@@ -88,20 +94,35 @@ because it contains `hasTrustDialogAccepted` and `allowedTools`. Restoring it on
 a new machine skips the trust prompt for that folder, which you should decide
 consciously.
 
-### Restoring to a different folder or machine
-
-Run `restore` from the new folder (or pass `--project`). Files land under the
-encoded name of the new path and prompt history is rewritten to point at it.
-Two things keep their original absolute paths because they are inside the
-transcripts: references to plan files and `/rewind` checkpoints. The
-conversation resumes fine; `/rewind` into pre-backup checkpoints may not work
-when the folder moved.
-
-Then:
+### Renamed or moved project
 
 ```sh
-cd <folder> && claude --resume
+cd A && claude-backup
+mv A B
+cd B && claude-backup restore ~/claude-backups/<encoded-A>/<archive>   # add --with-config to skip the trust prompt again
+claude --resume
 ```
+
+`restore` notices the folder changed and asks:
+
+```
+This archive was made for  /work/A
+You are restoring it to    /work/B
+Rewrite that path inside the restored transcripts, memory and plans so that
+resumed sessions and /rewind refer to the new folder? [Y/n]
+```
+
+Answer `y` and every recorded absolute path under A becomes the same path
+under B: the `cwd` on each record, the file paths `/rewind` checkpoints are
+keyed by, and any mention in memory notes or plans. Only whole paths are
+touched, so `/work/A` never turns `/work/A-other` into something else. The
+archive itself is never modified. Answer `n` and the conversation still
+resumes, but `/rewind` into pre-rename checkpoints is not supported.
+
+Files land under the encoded name of the new path and prompt history is
+rewritten to point at it. The old `projects/<encoded-A>` data stays until you
+run `claude purge <old path>`. The same flow restores a project onto another
+machine; the ask appears there too whenever the path differs.
 
 Claude Code's transcript format is internal and can change between versions.
 A backup restored under a much newer version may not load.
