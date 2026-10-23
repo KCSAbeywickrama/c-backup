@@ -214,7 +214,7 @@ transcript whose `cwd` matches. Plans are found through the `slug` and
 ```
 src/main.rs      CLI (clap)
 src/claude.rs    where Claude Code keeps things; path encoding; transcript scanning
-src/manifest.rs  manifest.json schema, shared with the python branch
+src/manifest.rs  manifest.json schema (first entry of every archive)
 src/backup.rs    backup command
 src/restore.rs   restore command
 src/list.rs      list command
