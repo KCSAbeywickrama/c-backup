@@ -88,8 +88,8 @@ pub fn all_archives(root: &Path) -> Vec<ArchiveInfo> {
     v
 }
 
-/// Print archives numbered from 1; with `grouped`, a heading per project.
-pub fn print_archives(items: &[ArchiveInfo], grouped: bool) {
+/// Print archives numbered from `start`; with `grouped`, a heading per project.
+pub fn print_archives(items: &[ArchiveInfo], grouped: bool, start: usize) {
     let mut last = "";
     for (i, a) in items.iter().enumerate() {
         if grouped && a.manifest.project_path != last {
@@ -98,7 +98,7 @@ pub fn print_archives(items: &[ArchiveInfo], grouped: bool) {
         }
         log(format!(
             "  {:>3}  {}  {:>9}  {:>3} sessions  {}",
-            i + 1,
+            start + i,
             a.manifest
                 .created_at
                 .chars()
@@ -138,17 +138,35 @@ pub fn pick_archive(items: &[ArchiveInfo]) -> Option<&ArchiveInfo> {
     }
 }
 
+/// An archive given on the command line: a path, or a bare file name looked up in the
+/// project's `.claude-backup/` and then under the backup root.
+pub fn resolve_archive_arg(arg: &Path, project: &Path, root: &Path) -> Result<PathBuf> {
+    let a = expand_tilde(&path_str(arg));
+    if a.is_file() {
+        return Ok(a);
+    }
+    if let Some(name) = a.file_name() {
+        for dir in [
+            local_backup_dir(project),
+            root.join(encode_path(&path_str(project))),
+        ] {
+            let p = dir.join(name);
+            if p.is_file() {
+                return Ok(p);
+            }
+        }
+    }
+    bail!("archive not found: {}", a.display())
+}
+
 pub fn run(args: &ListArgs) -> Result<()> {
     let cfg = config_dir();
+    let project = resolve_project(&args.project)?;
     if let Some(a) = &args.archive {
-        let a = expand_tilde(&path_str(a));
-        if !a.is_file() {
-            bail!("not found: {}", a.display());
-        }
+        let a = resolve_archive_arg(a, &project, &backup_root(&args.out))?;
         return list_archive(&a, &cfg);
     }
 
-    let project = resolve_project(&args.project)?;
     if args.local {
         let Some(project_dir) = find_project_dir(&cfg, &project) else {
             bail!("no Claude Code data found for {}", project.display());
@@ -176,12 +194,18 @@ pub fn run(args: &ListArgs) -> Result<()> {
     }
 
     let out_root = backup_root(&args.out);
+    let local_dir = local_backup_dir(&project);
     let own_dir = out_root.join(encode_path(&path_str(&project)));
+    let local = archives_in(&local_dir);
     let own = archives_in(&own_dir);
-    if args.all || own.is_empty() {
+    if args.all || (local.is_empty() && own.is_empty()) {
         let all = all_archives(&out_root);
-        if all.is_empty() {
-            log(format!("no backups under {}", out_root.display()));
+        if all.is_empty() && local.is_empty() {
+            log(format!(
+                "no backups under {} or in {}",
+                out_root.display(),
+                local_dir.display()
+            ));
             return Ok(());
         }
         if args.all {
@@ -193,15 +217,29 @@ pub fn run(args: &ListArgs) -> Result<()> {
                 out_root.display()
             ));
         }
-        print_archives(&all, true);
+        let mut n = 1;
+        if !local.is_empty() {
+            log(format!("  {}", local_dir.display()));
+            print_archives(&local, false, n);
+            n += local.len();
+        }
+        print_archives(&all, true, n);
         return Ok(());
     }
-    log(format!(
-        "backups for {} in {}",
-        project.display(),
-        own_dir.display()
-    ));
-    print_archives(&own, false);
+    let mut n = 1;
+    if !local.is_empty() {
+        log(format!("backups in {}", local_dir.display()));
+        print_archives(&local, false, n);
+        n += local.len();
+    }
+    if !own.is_empty() {
+        log(format!(
+            "backups for {} in {}",
+            project.display(),
+            own_dir.display()
+        ));
+        print_archives(&own, false, n);
+    }
     Ok(())
 }
 

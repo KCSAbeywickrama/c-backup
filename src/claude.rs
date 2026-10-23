@@ -88,6 +88,41 @@ pub fn claude_json_path() -> PathBuf {
     }
 }
 
+/// Folder inside a project that holds its own backups (`--here`).
+pub const LOCAL_DIR: &str = ".claude-backup";
+
+pub fn local_backup_dir(project: &Path) -> PathBuf {
+    project.join(LOCAL_DIR)
+}
+
+/// `.git/info/exclude` for the repository containing `path`, also inside worktrees.
+pub fn git_exclude_path(path: &Path) -> Option<PathBuf> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["rev-parse", "--git-path", "info/exclude"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let p = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    Some(if p.is_absolute() { p } else { path.join(p) })
+}
+
+/// Whether git ignores `rel` (relative to `path`).
+pub fn git_ignores(path: &Path, rel: &str) -> bool {
+    Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["check-ignore", "-q", rel])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 /// Claude Code's project-directory name: every non-alphanumeric char becomes '-'.
 pub fn encode_path(path: &str) -> String {
     path.chars()

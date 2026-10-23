@@ -1,6 +1,8 @@
 use crate::backup::{parse_prefixes, resolve_project};
 use crate::claude::*;
-use crate::list::{all_archives, archives_in, backup_root, pick_archive, print_archives};
+use crate::list::{
+    all_archives, archives_in, backup_root, pick_archive, print_archives, resolve_archive_arg,
+};
 use crate::manifest::{MANIFEST_NAME, open_archive, read_manifest};
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value};
@@ -242,30 +244,50 @@ fn merge_claude_json(entry: &Value, project: &Path, force: bool, dry_run: bool) 
     Ok("wrote entry".into())
 }
 
-/// No archive given: the newest backup of this folder, a pick among several, or a pick among
-/// every backup when this folder has none yet (for example right after a rename).
+/// No archive given: look in the folder's own `.claude-backup/` first, then its backups under
+/// the backup root. One candidate is used as is; several are offered for a pick (without a
+/// terminal the newest local one, else the newest under the root, is used). When the folder has
+/// none at all, typically right after a rename, every backup is listed for a pick.
 fn choose_archive(args: &RestoreArgs) -> Result<Option<PathBuf>> {
     let project = resolve_project(&args.project)?;
     let root = backup_root(&args.out);
-    let own = archives_in(&root.join(encode_path(&path_str(&project))));
-    if !own.is_empty() {
-        if own.len() > 1 && can_ask() {
-            log(format!("backups for {}", project.display()));
-            print_archives(&own, false);
-            return Ok(pick_archive(&own).map(|a| a.path.clone()));
+    let local_dir = local_backup_dir(&project);
+    let own_dir = root.join(encode_path(&path_str(&project)));
+    let mut candidates = archives_in(&local_dir);
+    let n_local = candidates.len();
+    candidates.extend(archives_in(&own_dir));
+    if !candidates.is_empty() {
+        if candidates.len() > 1 && can_ask() {
+            if n_local > 0 {
+                log(format!("backups in {}", local_dir.display()));
+                print_archives(&candidates[..n_local], false, 1);
+            }
+            if candidates.len() > n_local {
+                log(format!(
+                    "backups for {} in {}",
+                    project.display(),
+                    own_dir.display()
+                ));
+                print_archives(&candidates[n_local..], false, n_local + 1);
+            }
+            return Ok(pick_archive(&candidates).map(|a| a.path.clone()));
         }
-        return Ok(Some(own[0].path.clone()));
+        return Ok(Some(candidates[0].path.clone()));
     }
     let all = all_archives(&root);
     if all.is_empty() {
-        bail!("no backups under {}", root.display());
+        bail!(
+            "no backups under {} or in {}",
+            root.display(),
+            local_dir.display()
+        );
     }
     log(format!(
         "no backups for {}; all backups under {}:",
         project.display(),
         root.display()
     ));
-    print_archives(&all, true);
+    print_archives(&all, true, 1);
     if !can_ask() {
         bail!("no terminal to pick from; pass the archive path");
     }
@@ -275,11 +297,7 @@ fn choose_archive(args: &RestoreArgs) -> Result<Option<PathBuf>> {
 pub fn run(args: &RestoreArgs) -> Result<()> {
     let archive = match &args.archive {
         Some(a) => {
-            let a = expand_tilde(&path_str(a));
-            if !a.is_file() {
-                bail!("archive not found: {}", a.display());
-            }
-            a
+            resolve_archive_arg(a, &resolve_project(&args.project)?, &backup_root(&args.out))?
         }
         None => match choose_archive(args)? {
             Some(a) => a,

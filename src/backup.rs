@@ -1,4 +1,5 @@
 use crate::claude::*;
+use crate::list::backup_root;
 use crate::manifest::{MANIFEST_FORMAT, MANIFEST_NAME, Manifest, SessionEntry};
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Local, SecondsFormat};
@@ -34,6 +35,43 @@ pub struct BackupArgs {
     pub keep: Option<usize>,
     #[arg(long)]
     pub dry_run: bool,
+    /// Store the archive in <project>/.claude-backup/ instead of the backup root. Once that
+    /// folder exists, later runs without --out keep using it.
+    #[arg(long, conflicts_with = "out")]
+    pub here: bool,
+}
+
+/// Make git ignore `.claude-backup/` through `.git/info/exclude`, which touches no tracked
+/// file. Returns a line to print when something was added; `None` outside a git repository.
+fn ensure_git_excluded(project: &Path) -> Option<String> {
+    let exclude = git_exclude_path(project)?;
+    let pattern = format!("{LOCAL_DIR}/");
+    let existing = fs::read_to_string(&exclude).unwrap_or_default();
+    let mut note = None;
+    if !existing.lines().any(|l| l.trim() == pattern) {
+        if let Some(p) = exclude.parent() {
+            let _ = fs::create_dir_all(p);
+        }
+        if let Ok(mut f) = OpenOptions::new().append(true).create(true).open(&exclude) {
+            let sep = if existing.is_empty() || existing.ends_with('\n') {
+                ""
+            } else {
+                "\n"
+            };
+            use std::io::Write;
+            let _ = writeln!(f, "{sep}{pattern}");
+            note = Some(format!(
+                "git ignore   added {pattern} to {}",
+                exclude.display()
+            ));
+        }
+    }
+    if !git_ignores(project, LOCAL_DIR) {
+        warn(format!(
+            "{LOCAL_DIR}/ is not ignored by git (a .gitignore rule may override it); transcripts must never be committed"
+        ));
+    }
+    note
 }
 
 pub fn default_out() -> PathBuf {
@@ -261,12 +299,16 @@ pub fn run(args: &BackupArgs) -> Result<()> {
         sessions: sessions.clone(),
     };
 
-    let out_dir = args
-        .out
-        .clone()
-        .map(|p| expand_tilde(&path_str(&p)))
-        .unwrap_or_else(default_out)
-        .join(&manifest.project_encoded);
+    let local_dir = local_backup_dir(&project);
+    let use_local = args.here || (args.out.is_none() && local_dir.is_dir());
+    if args.here && !project.is_dir() {
+        bail!("--here needs the folder to exist: {}", project.display());
+    }
+    let out_dir = if use_local {
+        local_dir
+    } else {
+        backup_root(&args.out).join(&manifest.project_encoded)
+    };
     let base = project
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
@@ -313,6 +355,9 @@ pub fn run(args: &BackupArgs) -> Result<()> {
     }
 
     fs::create_dir_all(&out_dir)?;
+    if use_local && let Some(note) = ensure_git_excluded(&project) {
+        log(note);
+    }
     let file = OpenOptions::new()
         .write(true)
         .create_new(true)

@@ -25,6 +25,7 @@ cargo build --release && cp target/release/claude-backup /usr/local/bin/
 ```sh
 cd ~/work/my-project
 claude-backup                    # backup (default command)
+claude-backup --here             # backup into ./.claude-backup/ and keep doing so from now on
 claude-backup list               # backups of this folder (or all backups, if it has none)
 claude-backup list --all         # every backup under the backup root
 claude-backup list <archive>     # what is inside one archive
@@ -33,9 +34,27 @@ claude-backup restore            # newest backup of this folder; asks which one 
 claude-backup restore <archive>  # a specific archive
 ```
 
-When the current folder has no backups of its own, `restore` lists every
-backup under the backup root, grouped by project, and asks which one to use.
-That is the normal case right after renaming or moving a folder.
+`restore` without an archive looks in the folder's own `.claude-backup/`
+first, then in that folder's backups under the backup root. One match is used
+as is; several are listed and you pick. When the folder has none at all, it
+lists every backup under the backup root, grouped by project, and asks which
+one to use. An archive can also be given as a bare file name.
+
+### Keeping backups inside the project
+
+`claude-backup --here` writes the archive to `<project>/.claude-backup/`
+instead. Once that folder exists, plain `claude-backup` keeps using it for
+that project; its presence is the opt-in. The backup then travels with the
+folder: rename it, move it, copy it to another machine, and `claude-backup
+restore` run inside it finds the archive without any path.
+
+In a git repository the tool adds `.claude-backup/` to `.git/info/exclude`,
+which ignores it locally without touching a tracked file, and warns if the
+folder still shows up as unignored. Transcripts contain file contents, command
+output and anything a tool printed, so they must never be committed; keep the
+folder out of anything that syncs or publishes the project. A backup kept only
+inside the folder also disappears with it, so for insurance against deleting
+the project use the default location or both.
 
 Archives go to `~/claude-backups/<encoded-project-path>/<name>-<timestamp>.tar.gz`
 (override with `--out DIR` or `CLAUDE_BACKUP_DIR`). They are created with mode
@@ -103,14 +122,16 @@ consciously.
 ### Renamed or moved project
 
 ```sh
-cd A && claude-backup
+cd A && claude-backup                  # or: claude-backup --here
 mv A B
 cd B && claude-backup restore          # add --with-config to skip the trust prompt again
 claude --resume
 ```
 
-B has no backups of its own yet, so `restore` lists every backup and asks which
-one to use. Pick A's. It then notices the folder changed and asks:
+With `--here` the archive moved along inside `B/.claude-backup/` and `restore`
+takes it directly. Otherwise B has no backups of its own yet, so `restore`
+lists every backup and asks which one to use; pick A's. Either way it then
+notices the folder changed and asks:
 
 ```
 This archive was made for  /work/A
