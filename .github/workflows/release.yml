@@ -116,7 +116,7 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${TAG}/install.sh | sh
           \`\`\`
 
-          Installs \`claude-backup\` and the short alias \`cbk\` into \`~/.local/bin\`.
+          Installs \`claude-backup\` and the short alias \`cbackup\` into \`~/.local/bin\`.
           Set \`BINDIR\` to install elsewhere, or \`VERSION=${TAG}\` to pin this release.
 
           ## Verify

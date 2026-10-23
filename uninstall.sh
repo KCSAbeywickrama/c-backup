@@ -9,7 +9,7 @@ set -eu
 BINDIR="${BINDIR:-$HOME/.local/bin}"
 removed=0
 
-for name in claude-backup cbk; do
+for name in claude-backup cbackup; do
   target="$BINDIR/$name"
   if [ -e "$target" ] || [ -L "$target" ]; then
     rm -f "$target"

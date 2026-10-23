@@ -1,4 +1,4 @@
-# claude-backup
+# c-backup
 
 Back up and restore everything Claude Code keeps for one project folder.
 
@@ -15,12 +15,13 @@ be restored by the other.
 ## Install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/KCSAbeywickrama/claude-backup/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/KCSAbeywickrama/c-backup/main/install.sh | sh
 ```
 
 Downloads a prebuilt binary for your platform, verifies its SHA-256 against the
-release checksums, then installs `claude-backup` into `~/.local/bin`. No Rust
-toolchain needed.
+release checksums, then installs `claude-backup` and the short alias `cbackup`
+into `~/.local/bin`. The two names are interchangeable; this README uses
+`cbackup`. No Rust toolchain needed.
 
 Prebuilt binaries cover macOS (Apple Silicon and Intel) and Linux (x86_64 and
 arm64, statically linked). Any other platform builds from source automatically,
@@ -30,11 +31,16 @@ which does need a Rust toolchain (1.88 or newer, [rustup.rs](https://rustup.rs))
 BINDIR=/usr/local/bin ./install.sh   # choose another bin dir
 VERSION=v0.1.0 ./install.sh          # pin a specific release
 FROM_SOURCE=1 ./install.sh           # skip the download, build locally
+REPO=owner/name ./install.sh         # a different repository
 ```
 
-This also installs `cbk`, a short alias for `claude-backup`; the two are
-interchangeable. If the script warns that the bin dir is not on your PATH, add
-it, for example to `~/.zshrc`:
+`install.sh` downloads from `$REPO` (default `KCSAbeywickrama/c-backup`) and
+refuses to install anything it cannot verify. Until that repository has a
+release it falls through to building from source, so `./install.sh` works
+either way.
+
+If the script warns that the bin dir is not on your PATH, add it, for example
+to `~/.zshrc`:
 
 ```sh
 export PATH="$HOME/.local/bin:$PATH"
@@ -64,14 +70,14 @@ builds the four targets, writes `SHA256SUMS`, and publishes them.
 
 ```sh
 cd ~/work/my-project
-claude-backup                    # backup (default command)
-claude-backup --here             # backup into ./.claude-backup/ and keep doing so from now on
-claude-backup list               # backups of this folder (or all backups, if it has none)
-claude-backup list --all         # every backup under the backup root
-claude-backup list <archive>     # what is inside one archive
-claude-backup list --local       # sessions currently in ~/.claude for this folder
-claude-backup restore            # newest backup of this folder; asks which one if there are several
-claude-backup restore <archive>  # a specific archive
+cbackup                    # backup (default command)
+cbackup --here             # backup into ./.claude-backup/ and keep doing so from now on
+cbackup list               # backups of this folder (or all backups, if it has none)
+cbackup list --all         # every backup under the backup root
+cbackup list <archive>     # what is inside one archive
+cbackup list --local       # sessions currently in ~/.claude for this folder
+cbackup restore            # newest backup of this folder; asks which one if there are several
+cbackup restore <archive>  # a specific archive
 ```
 
 `restore` without an archive looks in the folder's own `.claude-backup/`
@@ -82,10 +88,10 @@ one to use. An archive can also be given as a bare file name.
 
 ### Keeping backups inside the project
 
-`claude-backup --here` writes the archive to `<project>/.claude-backup/`
-instead. Once that folder exists, plain `claude-backup` keeps using it for
+`cbackup --here` writes the archive to `<project>/.claude-backup/`
+instead. Once that folder exists, plain `cbackup` keeps using it for
 that project; its presence is the opt-in. The backup then travels with the
-folder: rename it, move it, copy it to another machine, and `claude-backup
+folder: rename it, move it, copy it to another machine, and `cbackup
 restore` run inside it finds the archive without any path.
 
 In a git repository the tool adds `.claude-backup/` to `.git/info/exclude`,
@@ -162,9 +168,9 @@ consciously.
 ### Renamed or moved project
 
 ```sh
-cd A && claude-backup                  # or: claude-backup --here
+cd A && cbackup                  # or: cbackup --here
 mv A B
-cd B && claude-backup restore          # add --with-config to skip the trust prompt again
+cd B && cbackup restore          # add --with-config to skip the trust prompt again
 claude --resume
 ```
 
@@ -222,14 +228,22 @@ src/list.rs      list command
 - `cleanupPeriodDays` in `settings.json` controls deletion of old transcripts, plans and checkpoints. Raise it to keep things longer; it is retention, not backup.
 - `claude purge [path]` deletes a project's data. The opposite of this tool.
 - `~/.claude/backups/` holds copies of `~/.claude.json` only, never transcripts.
-- Hooks receive `transcript_path`, so a `SessionEnd` hook can call `claude-backup` automatically:
+- Hooks receive `transcript_path`, so a `SessionEnd` hook can call `cbackup` automatically:
 
 ```json
 {
   "hooks": {
     "SessionEnd": [
-      { "hooks": [ { "type": "command", "command": "claude-backup --no-file-history --keep 10" } ] }
+      { "hooks": [ { "type": "command", "command": "cbackup --no-file-history --keep 10" } ] }
     ]
   }
 }
 ```
+
+## License
+
+MIT
+
+## Disclaimer
+
+**c-backup** is a third-party tool and is not affiliated with Anthropic.

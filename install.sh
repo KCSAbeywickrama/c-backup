@@ -7,20 +7,21 @@
 # one script instead of two.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/KCSAbeywickrama/claude-backup/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/KCSAbeywickrama/c-backup/main/install.sh | sh
 #   ./install.sh                        # latest release into ~/.local/bin
 #   BINDIR=/usr/local/bin ./install.sh  # choose another bin dir
 #   VERSION=v0.1.0 ./install.sh         # pin a specific release
 #   FROM_SOURCE=1 ./install.sh          # skip the download, build locally
+#   REPO=owner/name ./install.sh        # a different repository
 #
 # Gatekeeper note: these binaries are ad-hoc signed, not notarized. macOS only
 # quarantines files stamped by the downloading app (browsers, Mail, AirDrop);
 # curl and wget do not set that attribute, so a downloaded binary runs as-is.
 set -eu
 
-REPO=KCSAbeywickrama/claude-backup
+REPO="${REPO:-KCSAbeywickrama/c-backup}"
 BIN=claude-backup
-ALIAS=cbk
+ALIAS=cbackup
 
 BINDIR="${BINDIR:-$HOME/.local/bin}"
 VERSION="${VERSION:-latest}"
@@ -97,7 +98,7 @@ place() {
 build_from_source() {
   [ -f "$SCRIPT_DIR/Cargo.toml" ] || die "no Cargo.toml next to this script, so there is nothing to build.
   Clone the repo and re-run, or install a prebuilt release:
-    git clone https://github.com/$REPO && cd claude-backup && ./install.sh"
+    git clone https://github.com/$REPO && cd c-backup && ./install.sh"
 
   command -v cargo >/dev/null 2>&1 || die "cargo not found on PATH.
   Install a Rust toolchain (https://rustup.rs), or if you just installed one,
@@ -170,7 +171,7 @@ main() {
   esac
 
   echo
-  echo "Try it: cd <project> && claude-backup    (or cbk; inside Claude Code: !cbk)"
+  echo "Try it: cd <project> && cbackup    (or claude-backup; inside Claude Code: !cbackup)"
 }
 
 main "$@"

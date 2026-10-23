@@ -35,8 +35,8 @@ fi
 
 mkdir -p "$BINDIR"
 
-# Install under both names: `claude-backup` and the short alias `cbk`.
-for name in claude-backup cbk; do
+# Install under both names: `claude-backup` and the short alias `cbackup`.
+for name in claude-backup cbackup; do
   target="$BINDIR/$name"
   if [ -e "$target" ] || [ -L "$target" ]; then
     rm -f "$target"
@@ -57,4 +57,4 @@ case ":$PATH:" in
 esac
 
 echo
-echo "Try it: cd <project> && claude-backup    (or cbk; inside Claude Code: !cbk)"
+echo "Try it: cd <project> && cbackup    (or claude-backup; inside Claude Code: !cbackup)"
