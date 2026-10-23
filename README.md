@@ -8,13 +8,16 @@ and `cleanupPeriodDays` (default 30 days) silently deletes old sessions, plans
 and checkpoints. This tool packs a project's data into one `.tar.gz` and puts
 it back later, on the same machine or another one.
 
-Single Python 3.8+ file, standard library only.
+Written in Rust. A single-file Python version with the same commands and the
+same archive format lives on the `python` branch; archives made by either can
+be restored by the other.
 
 ## Install
 
 ```sh
-chmod +x claude-backup
-ln -s "$PWD/claude-backup" /usr/local/bin/claude-backup   # or anywhere on PATH
+cargo install --path .            # puts claude-backup on ~/.cargo/bin
+# or
+cargo build --release && cp target/release/claude-backup /usr/local/bin/
 ```
 
 ## Use
@@ -110,6 +113,17 @@ character replaced by `-` (`/Users/you/app` → `-Users-you-app`). If that does
 not exist (very long paths get a hashed name), it scans `projects/` for a
 transcript whose `cwd` matches. Plans are found through the `slug` and
 `planFilePath` fields inside transcripts.
+
+## Layout
+
+```
+src/main.rs      CLI (clap)
+src/claude.rs    where Claude Code keeps things; path encoding; transcript scanning
+src/manifest.rs  manifest.json schema, shared with the python branch
+src/backup.rs    backup command
+src/restore.rs   restore command
+src/list.rs      list command
+```
 
 ## Related Claude Code features (as of 2.1.x)
 
