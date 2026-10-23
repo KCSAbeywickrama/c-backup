@@ -10,9 +10,7 @@ and `cleanupPeriodDays` (default 30 days) silently deletes old sessions, plans
 and checkpoints. This tool packs a project's data into one `.tar.gz` and puts
 it back later, on the same machine or another one.
 
-Written in Rust. A single-file Python version with the same commands and the
-same archive format lives on the `python` branch; archives made by either can
-be restored by the other.
+Written in Rust: one static binary, no runtime to install.
 
 ## Install
 
