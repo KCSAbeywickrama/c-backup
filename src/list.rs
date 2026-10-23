@@ -1,9 +1,11 @@
 use crate::backup::{default_out, resolve_project};
 use crate::claude::*;
-use crate::manifest::read_manifest;
+use crate::manifest::{Manifest, read_manifest};
 use anyhow::{Result, bail};
 use chrono::{DateTime, Local};
+use std::collections::BTreeMap;
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 #[derive(clap::Args, Debug)]
@@ -19,6 +21,121 @@ pub struct ListArgs {
     /// List sessions currently in ~/.claude for this folder
     #[arg(long)]
     pub local: bool,
+    /// List every backup under the backup root, not only this folder's
+    #[arg(long)]
+    pub all: bool,
+}
+
+pub struct ArchiveInfo {
+    pub path: PathBuf,
+    pub size: u64,
+    pub manifest: Manifest,
+}
+
+pub fn backup_root(out: &Option<PathBuf>) -> PathBuf {
+    out.clone()
+        .map(|p| expand_tilde(&path_str(&p)))
+        .unwrap_or_else(default_out)
+}
+
+/// Readable archives in one directory, newest first.
+pub fn archives_in(dir: &Path) -> Vec<ArchiveInfo> {
+    let mut v = Vec::new();
+    let Ok(rd) = fs::read_dir(dir) else { return v };
+    for p in rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file() && path_str(p).ends_with(".tar.gz"))
+    {
+        match read_manifest(&p) {
+            Ok(manifest) => v.push(ArchiveInfo {
+                size: fs::metadata(&p).map(|m| m.len()).unwrap_or(0),
+                path: p,
+                manifest,
+            }),
+            Err(e) => warn(format!("skipping {}: {e:#}", p.display())),
+        }
+    }
+    v.sort_by(|a, b| b.manifest.created_at.cmp(&a.manifest.created_at));
+    v
+}
+
+/// Every readable archive under the backup root, grouped by project. Projects with the newest
+/// backup come first; within a project, newest first.
+pub fn all_archives(root: &Path) -> Vec<ArchiveInfo> {
+    let mut v: Vec<ArchiveInfo> = fs::read_dir(root)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .flat_map(|d| archives_in(&d))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut newest: BTreeMap<String, String> = BTreeMap::new();
+    for a in &v {
+        let e = newest.entry(a.manifest.project_path.clone()).or_default();
+        if a.manifest.created_at > *e {
+            *e = a.manifest.created_at.clone();
+        }
+    }
+    v.sort_by(|a, b| {
+        newest[&b.manifest.project_path]
+            .cmp(&newest[&a.manifest.project_path])
+            .then_with(|| a.manifest.project_path.cmp(&b.manifest.project_path))
+            .then_with(|| b.manifest.created_at.cmp(&a.manifest.created_at))
+    });
+    v
+}
+
+/// Print archives numbered from 1; with `grouped`, a heading per project.
+pub fn print_archives(items: &[ArchiveInfo], grouped: bool) {
+    let mut last = "";
+    for (i, a) in items.iter().enumerate() {
+        if grouped && a.manifest.project_path != last {
+            log(format!("  {}", a.manifest.project_path));
+            last = &a.manifest.project_path;
+        }
+        log(format!(
+            "  {:>3}  {}  {:>9}  {:>3} sessions  {}",
+            i + 1,
+            a.manifest
+                .created_at
+                .chars()
+                .take(19)
+                .collect::<String>()
+                .replace('T', " "),
+            human(a.size),
+            a.manifest.sessions.len(),
+            a.path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        ));
+    }
+}
+
+/// Ask which archive to use. `None` when cancelled with Enter, `q` or EOF.
+pub fn pick_archive(items: &[ArchiveInfo]) -> Option<&ArchiveInfo> {
+    loop {
+        print!("restore which? [1-{}, Enter cancels] ", items.len());
+        let _ = io::stdout().flush();
+        let mut line = String::new();
+        if io::stdin().read_line(&mut line).unwrap_or(0) == 0 {
+            return None;
+        }
+        let t = line.trim();
+        if t.is_empty() || t.eq_ignore_ascii_case("q") {
+            return None;
+        }
+        match t.parse::<usize>() {
+            Ok(n) if (1..=items.len()).contains(&n) => return Some(&items[n - 1]),
+            _ => log(format!(
+                "please enter a number between 1 and {}",
+                items.len()
+            )),
+        }
+    }
 }
 
 pub fn run(args: &ListArgs) -> Result<()> {
@@ -58,43 +175,33 @@ pub fn run(args: &ListArgs) -> Result<()> {
         return Ok(());
     }
 
-    let out_root = args
-        .out
-        .clone()
-        .map(|p| expand_tilde(&path_str(&p)))
-        .unwrap_or_else(default_out);
-    let out_dir = out_root.join(encode_path(&path_str(&project)));
-    let mut archives: Vec<PathBuf> = fs::read_dir(&out_dir)
-        .map(|rd| {
-            rd.flatten()
-                .map(|e| e.path())
-                .filter(|p| p.is_file() && path_str(p).ends_with(".tar.gz"))
-                .collect()
-        })
-        .unwrap_or_default();
-    archives.sort_by_key(|p| std::cmp::Reverse(mtime(p)));
-    if archives.is_empty() {
-        log(format!(
-            "no backups for {} in {}",
-            project.display(),
-            out_root.display()
-        ));
+    let out_root = backup_root(&args.out);
+    let own_dir = out_root.join(encode_path(&path_str(&project)));
+    let own = archives_in(&own_dir);
+    if args.all || own.is_empty() {
+        let all = all_archives(&out_root);
+        if all.is_empty() {
+            log(format!("no backups under {}", out_root.display()));
+            return Ok(());
+        }
+        if args.all {
+            log(format!("all backups under {}", out_root.display()));
+        } else {
+            log(format!(
+                "no backups for {}; all backups under {}:",
+                project.display(),
+                out_root.display()
+            ));
+        }
+        print_archives(&all, true);
         return Ok(());
     }
-    log(format!("backups for {}", project.display()));
-    for a in archives {
-        match read_manifest(&a) {
-            Ok(m) => log(format!(
-                "  {}  {:<9} {:>3} sessions  {:>2} plans  {}",
-                m.created_at.chars().take(19).collect::<String>(),
-                human(fs::metadata(&a)?.len()),
-                m.sessions.len(),
-                m.plans.len(),
-                a.display()
-            )),
-            Err(_) => log(format!("  (unreadable)  {}", a.display())),
-        }
-    }
+    log(format!(
+        "backups for {} in {}",
+        project.display(),
+        own_dir.display()
+    ));
+    print_archives(&own, false);
     Ok(())
 }
 

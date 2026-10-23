@@ -25,11 +25,17 @@ cargo build --release && cp target/release/claude-backup /usr/local/bin/
 ```sh
 cd ~/work/my-project
 claude-backup                    # backup (default command)
-claude-backup list               # backups of this folder
+claude-backup list               # backups of this folder (or all backups, if it has none)
+claude-backup list --all         # every backup under the backup root
 claude-backup list <archive>     # what is inside one archive
 claude-backup list --local       # sessions currently in ~/.claude for this folder
-claude-backup restore <archive>  # put it back for this folder
+claude-backup restore            # newest backup of this folder; asks which one if there are several
+claude-backup restore <archive>  # a specific archive
 ```
+
+When the current folder has no backups of its own, `restore` lists every
+backup under the backup root, grouped by project, and asks which one to use.
+That is the normal case right after renaming or moving a folder.
 
 Archives go to `~/claude-backups/<encoded-project-path>/<name>-<timestamp>.tar.gz`
 (override with `--out DIR` or `CLAUDE_BACKUP_DIR`). They are created with mode
@@ -99,11 +105,12 @@ consciously.
 ```sh
 cd A && claude-backup
 mv A B
-cd B && claude-backup restore ~/claude-backups/<encoded-A>/<archive>   # add --with-config to skip the trust prompt again
+cd B && claude-backup restore          # add --with-config to skip the trust prompt again
 claude --resume
 ```
 
-`restore` notices the folder changed and asks:
+B has no backups of its own yet, so `restore` lists every backup and asks which
+one to use. Pick A's. It then notices the folder changed and asks:
 
 ```
 This archive was made for  /work/A

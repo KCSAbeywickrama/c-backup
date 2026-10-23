@@ -1,5 +1,6 @@
 use crate::backup::{parse_prefixes, resolve_project};
 use crate::claude::*;
+use crate::list::{all_archives, archives_in, backup_root, pick_archive, print_archives};
 use crate::manifest::{MANIFEST_NAME, open_archive, read_manifest};
 use anyhow::{Context, Result, bail};
 use serde_json::{Map, Value};
@@ -11,8 +12,11 @@ use std::path::{Path, PathBuf};
 
 #[derive(clap::Args, Debug)]
 pub struct RestoreArgs {
-    /// Archive to restore
-    pub archive: PathBuf,
+    /// Archive to restore (default: the newest backup of this folder, or a pick from all backups)
+    pub archive: Option<PathBuf>,
+    /// Backup root to look in when no archive is given (default: ~/claude-backups, or $CLAUDE_BACKUP_DIR)
+    #[arg(long)]
+    pub out: Option<PathBuf>,
     /// Restore for this folder (default: current directory)
     #[arg(long)]
     pub project: Option<PathBuf>,
@@ -238,11 +242,53 @@ fn merge_claude_json(entry: &Value, project: &Path, force: bool, dry_run: bool) 
     Ok("wrote entry".into())
 }
 
-pub fn run(args: &RestoreArgs) -> Result<()> {
-    let archive = expand_tilde(&path_str(&args.archive));
-    if !archive.is_file() {
-        bail!("archive not found: {}", archive.display());
+/// No archive given: the newest backup of this folder, a pick among several, or a pick among
+/// every backup when this folder has none yet (for example right after a rename).
+fn choose_archive(args: &RestoreArgs) -> Result<Option<PathBuf>> {
+    let project = resolve_project(&args.project)?;
+    let root = backup_root(&args.out);
+    let own = archives_in(&root.join(encode_path(&path_str(&project))));
+    if !own.is_empty() {
+        if own.len() > 1 && can_ask() {
+            log(format!("backups for {}", project.display()));
+            print_archives(&own, false);
+            return Ok(pick_archive(&own).map(|a| a.path.clone()));
+        }
+        return Ok(Some(own[0].path.clone()));
     }
+    let all = all_archives(&root);
+    if all.is_empty() {
+        bail!("no backups under {}", root.display());
+    }
+    log(format!(
+        "no backups for {}; all backups under {}:",
+        project.display(),
+        root.display()
+    ));
+    print_archives(&all, true);
+    if !can_ask() {
+        bail!("no terminal to pick from; pass the archive path");
+    }
+    Ok(pick_archive(&all).map(|a| a.path.clone()))
+}
+
+pub fn run(args: &RestoreArgs) -> Result<()> {
+    let archive = match &args.archive {
+        Some(a) => {
+            let a = expand_tilde(&path_str(a));
+            if !a.is_file() {
+                bail!("archive not found: {}", a.display());
+            }
+            a
+        }
+        None => match choose_archive(args)? {
+            Some(a) => a,
+            None => {
+                log("cancelled");
+                return Ok(());
+            }
+        },
+    };
     let manifest = read_manifest(&archive)?;
     let cfg = config_dir();
 
