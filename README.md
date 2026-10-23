@@ -1,6 +1,6 @@
 # c-backup
 
-Back up and restore everything Claude Code keeps for one project folder. A command-line tool for [Claude Code](https://claude.com/claude-code).
+Back up and restore everything Claude Code keeps for one project folder. A command-line tool for Claude Code.
 
 > Not affiliated with or endorsed by Anthropic. Claude is a trademark of Anthropic.
 
